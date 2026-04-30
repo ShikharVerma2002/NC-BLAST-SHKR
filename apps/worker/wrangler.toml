@@ -1,0 +1,27 @@
+# NC BLAST Worker config.
+#
+# Deploy:     npx wrangler deploy
+# Dev:        npx wrangler dev
+# Secrets:    npx wrangler secret put CHALLONGE_API_KEY
+#             npx wrangler secret put ORGANIZER_MASTER_KEY
+# KV:         npx wrangler kv namespace create TOURNEY_KV
+#             (then paste the id below)
+
+name = "ncblast-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Paste your KV namespace id here after running `wrangler kv namespace create TOURNEY_KV`.
+# Example:
+#   kv_namespaces = [
+#     { binding = "TOURNEY_KV", id = "abc123..." }
+#   ]
+[[kv_namespaces]]
+binding = "TOURNEY_KV"
+id = "bcd1be40ad094ce5a0b86d7bebc2df7f"
+
+# Secrets are set via `wrangler secret put <NAME>` — they do NOT go in this file.
+# Placeholders for discoverability:
+# - CHALLONGE_API_KEY
+# - ORGANIZER_MASTER_KEY

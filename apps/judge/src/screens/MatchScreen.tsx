@@ -49,6 +49,7 @@ import { emptyCombo, comboStr, comboReady, tn, splitPartName } from "../utils";
 import { pushComboCacheToWorker, fetchComboCacheFromWorker, COMBO_CACHE_TTL } from "../comboCache";
 import { enqueue, remove as removeFromQueue } from "../submitQueue";
 import { useRefreshGuard } from "../hooks/useRefreshGuard";
+import { getSessionToken } from "../pin";
 
 type Phase = "pick" | "deck" | "battle" | "over";
 
@@ -583,15 +584,24 @@ export function MatchScreen(props: MatchScreenProps) {
     console.log("[Challonge submit]", { matchId, scoresCsv, setScoresLength: setScores.length, sets: [...sets], winnerId: winnerChallongeId });
     // Write-ahead: persist to outbox FIRST, then try to submit.
     const queueId = enqueue({ kind: "challonge", type: "challonge", payload });
+    // Attach the session token issued by /pin/verify so the Worker admits
+    // this submit without requiring the PIN re-entered on every request.
+    const sessionToken = getSessionToken(challongeSlug);
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (sessionToken) headers["X-Session-Token"] = sessionToken;
     try {
       const res = await fetch(`${WORKER_BASE_URL}/submit`, {
         method: "POST",
-        headers: {"Content-Type":"application/json"},
+        headers,
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(10000),
       });
       const data: unknown = await res.json();
       const errMsg = hasKey(data, "errors") && Array.isArray(data.errors) && data.errors.length ? String(data.errors[0]) : "";
+      // 401 means PIN/session is missing or expired — surface a specific message.
+      if (res.status === 401) {
+        throw new Error("PIN required or expired — re-enter on the Players screen.");
+      }
       if(!res.ok || errMsg) throw new Error(errMsg || `HTTP ${res.status}`);
       removeFromQueue(queueId);
       setChallongeSubmitStatus("ok");

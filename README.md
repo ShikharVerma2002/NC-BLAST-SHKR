@@ -103,11 +103,11 @@ If unset, both apps fall back to the production default
                          ▼             ▼
                 ┌──────────────────────────────┐
                 │  Cloudflare Worker           │
-                │ challonge-proxy...workers.dev│
-                │ - /overlay/push /poll /state │
-                │ - /list /matches /submit     │
-                │ - /combos/push /get          │
-                │ - / (Challonge slug proxy)   │
+                │  challonge-proxy...workers.dev│
+                │  - /overlay/push /poll /state │
+                │  - /list /matches /submit     │
+                │  - /combos/push /get          │
+                │  - / (Challonge slug proxy)   │
                 └──────────────────────────────┘
                          │
                          ▼

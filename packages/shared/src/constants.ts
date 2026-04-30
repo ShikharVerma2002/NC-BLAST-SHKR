@@ -9,7 +9,7 @@ import type { Finish } from "./types";
 export const WORKER_BASE_URL =
   (typeof import.meta !== "undefined" &&
     (import.meta as { env?: Record<string, string> }).env?.VITE_WORKER_URL) ||
-  "https://challonge-proxy.danny61734.workers.dev";
+  "https://ncblast-worker.shikharv1000.workers.dev";
 
 /** Alias kept for parity with source (`OVERLAY_WORKER`). */
 export const OVERLAY_WORKER = WORKER_BASE_URL;

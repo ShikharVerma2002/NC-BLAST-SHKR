@@ -5,6 +5,7 @@ import { S } from "../styles";
 import { IC } from "../components/Icons";
 import { TournamentBadge } from "../components/TournamentBadge";
 import { tn } from "../utils";
+import { getSessionToken, verifyPin } from "../pin";
 
 type ChallongeStatus = null | "loading" | "ok" | "error";
 type ChallongeSource = null | "live" | "cached";
@@ -52,6 +53,37 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
   const [deleteConfirmSlug,setDeleteConfirmSlug] = useState<string | null>(null);
   const csvRef = useRef<HTMLInputElement>(null);
   const [confirmClear,setConfirmClear] = useState(false);
+  // ── PIN entry state (tournament mode only) ────────────────────────────────
+  const [pinPromptSlug, setPinPromptSlug] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState("");
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [pinVerifying, setPinVerifying] = useState(false);
+  const [pinVerified, setPinVerified] = useState<string | null>(null); // slug that's been verified this session
+  // Open the PIN modal after a successful tournament-mode Challonge import.
+  const maybePromptPin = (slug: string): void => {
+    console.log("[PIN] Derived slug:", slug, "(config.tm =", config.tm, ")");
+    if (!config.tm) return; // only in tournament mode
+    if (pinVerified === slug) return; // already verified this session
+    // Check if we already have a token in sessionStorage (persists across screen nav)
+    if (getSessionToken(slug)) { setPinVerified(slug); return; }
+    setPinPromptSlug(slug);
+    setPinInput("");
+    setPinError(null);
+  };
+  const handlePinSubmit = async (): Promise<void> => {
+    if (!pinPromptSlug) return;
+    setPinVerifying(true);
+    setPinError(null);
+    const result = await verifyPin(pinPromptSlug, pinInput);
+    setPinVerifying(false);
+    if (result.ok) {
+      setPinVerified(pinPromptSlug);
+      setPinPromptSlug(null);
+      setPinInput("");
+    } else {
+      setPinError(result.message);
+    }
+  };
   const pRef = useRef<HTMLInputElement>(null);
 
   const add = () => {
@@ -184,6 +216,7 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
         ? `✓ ${names.length} players loaded from NC BLAST cache for "${slug}"`
         : `✓ ${names.length} players imported live from Challonge for "${slug}"`
       );
+      maybePromptPin(slug);
       // Refresh list so age timers stay current after loading
       refreshCachedList();
     } catch(err) {
@@ -239,6 +272,7 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
       setChallongeStatus("ok");
       setChallongeSource("cached");
       setChallongeMsg(`✓ ${lcHit.length} players loaded from NC BLAST cache for "${slug}"`);
+      maybePromptPin(slug);
       return;
     }
 
@@ -325,6 +359,7 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
           ? `✓ ${names.length} players loaded from NC BLAST cache for "${slug}"`
           : `✓ ${names.length} players imported live from Challonge for "${slug}"`
         );
+        maybePromptPin(slug);
         // Refresh the cached list immediately so the dropdown reflects the new entry
         refreshCachedList();
         return;
@@ -361,6 +396,47 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
 
   return (
     <div style={{...S.current.page,height:"100dvh",overflowY:"auto"}}>
+      {/* PIN entry modal — tournament mode only, blocks until verified or canceled */}
+      {pinPromptSlug && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.8)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 24px"}}>
+          <div style={{background:"var(--surface)",borderRadius:18,padding:"24px 20px",maxWidth:360,width:"100%",boxShadow:"0 20px 60px rgba(0,0,0,0.4)",border:"2px solid #7C3AED"}}>
+            <p style={{fontSize:18,fontWeight:900,color:"#7C3AED",marginBottom:4,textAlign:"center"}}>Tournament PIN</p>
+            <p style={{fontSize:12,color:"var(--text-muted)",marginBottom:14,textAlign:"center",lineHeight:1.5}}>
+              Ask your organizer for the PIN for <strong style={{color:"var(--text-primary)"}}>{pinPromptSlug}</strong>.<br/>
+              Without the PIN, scores cannot be submitted to Challonge.
+            </p>
+            <input
+              type="tel"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={8}
+              autoFocus
+              value={pinInput}
+              onChange={e=>{setPinInput(e.target.value.replace(/[^0-9]/g,""));setPinError(null);}}
+              onKeyDown={e=>{if(e.key==="Enter"&&pinInput.length>=4&&!pinVerifying)void handlePinSubmit();}}
+              placeholder="4-8 digit PIN"
+              style={{width:"100%",padding:"14px 16px",fontSize:22,textAlign:"center",letterSpacing:4,borderRadius:10,border:`2px solid ${pinError?"#DC2626":"var(--border)"}`,background:"var(--surface2)",color:"var(--text-primary)",fontFamily:"'JetBrains Mono',monospace",fontWeight:800,marginBottom:10,outline:"none"}}
+            />
+            {pinError&&<p style={{fontSize:12,color:"#DC2626",fontWeight:600,textAlign:"center",marginBottom:10}}>{pinError}</p>}
+            <div style={{display:"flex",gap:8}}>
+              <button type="button" onClick={()=>{setPinPromptSlug(null);setPinInput("");setPinError(null);}}
+                style={{flex:1,padding:"12px 0",borderRadius:10,border:"2px solid var(--border)",background:"var(--surface)",color:"var(--text-secondary)",fontSize:13,fontWeight:700,fontFamily:"'Outfit',sans-serif",cursor:"pointer"}}>
+                Cancel
+              </button>
+              <button type="button" disabled={pinInput.length<4||pinVerifying} onClick={()=>void handlePinSubmit()}
+                style={{flex:1,padding:"12px 0",borderRadius:10,border:"none",background:pinInput.length<4||pinVerifying?"#CBD5E1":"#7C3AED",color:"#fff",fontSize:13,fontWeight:700,fontFamily:"'Outfit',sans-serif",cursor:pinInput.length<4||pinVerifying?"not-allowed":"pointer"}}>
+                {pinVerifying?"Verifying…":"Verify"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Verified badge — small pill showing which slug is PIN-authorized this session */}
+      {config.tm && pinVerified && (
+        <div style={{position:"fixed",top:10,right:10,zIndex:10,background:"#F0FDF4",border:"1px solid #86EFAC",borderRadius:20,padding:"4px 10px",fontSize:10,fontWeight:700,color:"#15803D",fontFamily:"'Outfit',sans-serif"}}>
+          🔒 {pinVerified}
+        </div>
+      )}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
         <button style={{...S.current.back,marginBottom:0}} onClick={onBack}>{IC.back} Format</button>
         <TournamentBadge config={config}/>
@@ -550,8 +626,28 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
         </div>
       </div>
 
-      <button style={{...S.current.pri,opacity:players.length>=2?1:0.4}} disabled={players.length<2} onClick={onNext}>Start Matches →</button>
-      {players.length<2&&<p style={S.current.hint}>Need at least 2 players</p>}
+      {(() => {
+        const needPin = config.tm && !pinVerified;
+        const needPlayers = players.length < 2;
+        const blocked = needPlayers || needPin;
+        return (
+          <>
+            <button
+              style={{...S.current.pri, opacity: blocked ? 0.4 : 1}}
+              disabled={blocked}
+              onClick={onNext}
+            >
+              Start Matches →
+            </button>
+            {needPlayers && <p style={S.current.hint}>Need at least 2 players</p>}
+            {!needPlayers && needPin && (
+              <p style={{...S.current.hint, color: "#7C3AED", fontWeight: 600}}>
+                Tournament mode: enter the tournament PIN to continue. Import a Challonge tournament above to trigger the prompt.
+              </p>
+            )}
+          </>
+        );
+      })()}
 
       {/* In-app clear all confirmation modal */}
       {confirmClear&&(

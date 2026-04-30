@@ -14,9 +14,5 @@
     "dev:overlay": "npm run dev --workspace=@ncblast/overlay",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^6.0.1",
-    "vite": "^8.0.10"
   }
 }

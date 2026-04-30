@@ -13,6 +13,7 @@ import { mergeWithDefaults } from "./data/parts";
 import { makeS, S } from "./styles";
 import { comboStr } from "./utils";
 import { enqueue, remove as removeFromQueue, list as listQueue } from "./submitQueue";
+import { getSessionToken } from "./pin";
 
 type Screen = "format" | "players" | "match";
 
@@ -235,9 +236,15 @@ export function BeyJudgeApp() {
           } else if (kind === "challonge") {
             // Diagnostic: log exactly what we're retrying so duplicate submits show up in console.
             console.log("[Challonge retry-flush]", { itemId: item.id, payload: item.payload });
+            // Attach the session token for this tournament if we have one (the
+            // Worker needs it to admit the /submit when the tournament is PIN-gated).
+            const rtHeaders: Record<string, string> = { "Content-Type": "application/json" };
+            const payloadObj = item.payload as { slug?: string };
+            const rtToken = payloadObj.slug ? getSessionToken(payloadObj.slug) : null;
+            if (rtToken) rtHeaders["X-Session-Token"] = rtToken;
             const resp = await fetch(`${WORKER_BASE_URL}/submit`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: rtHeaders,
               body: JSON.stringify({ ...(item.payload as object), idempotencyKey: item.id }),
               signal: AbortSignal.timeout(10000),
             });
