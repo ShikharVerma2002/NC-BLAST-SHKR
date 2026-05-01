@@ -50,6 +50,7 @@ import { pushComboCacheToWorker, fetchComboCacheFromWorker, COMBO_CACHE_TTL } fr
 import { enqueue, remove as removeFromQueue } from "../submitQueue";
 import { useRefreshGuard } from "../hooks/useRefreshGuard";
 import { getSessionToken } from "../pin";
+import { getPreregCombos } from "../orgClient";
 
 type Phase = "pick" | "deck" | "battle" | "over";
 
@@ -282,6 +283,26 @@ export function MatchScreen(props: MatchScreenProps) {
   const [sidePicker,setSidePicker] = useState<SidePicker | null>(null);
   const [currentSides,setCurrentSides] = useState<{p1Side: Side; p2Side: Side}>({p1Side:"",p2Side:""});
   const [deckReview,setDeckReview] = useState(false);
+  // Prereg-combo loading state — tracks whether we've already tried/loaded for each player.
+  const [preregLoadedForP1, setPreregLoadedForP1] = useState(false);
+  const [preregLoadedForP2, setPreregLoadedForP2] = useState(false);
+  const [preregStatus, setPreregStatus] = useState<Record<string, "loading" | "ok" | "empty" | "error">>({});
+  const loadPrereg = async (who: 1 | 2): Promise<void> => {
+    const name = who === 1 ? p1 : p2;
+    if (!name || !challongeSlug) return;
+    setPreregStatus(s => ({ ...s, [name]: "loading" }));
+    const result = await getPreregCombos(challongeSlug, name);
+    if (result.ok && result.combos) {
+      const deck = result.combos;
+      if (who === 1) { setD1(deck); setPreregLoadedForP1(true); }
+      else { setD2(deck); setPreregLoadedForP2(true); }
+      setPreregStatus(s => ({ ...s, [name]: "ok" }));
+    } else if (result.ok && !result.combos) {
+      setPreregStatus(s => ({ ...s, [name]: "empty" }));
+    } else {
+      setPreregStatus(s => ({ ...s, [name]: "error" }));
+    }
+  };
   const [lerStrikes,setLerStrikes] = useState<[number, number]>([0,0]);
   const [pickTab,setPickTab] = useState<"roster"|"active">(challongeSlug?"active":"roster");
   const [activeMatches,setActiveMatches] = useState<"loading" | ChallongeMatch[] | null>(null);
@@ -1615,7 +1636,23 @@ export function MatchScreen(props: MatchScreenProps) {
           {who:2 as const,name:p2,deck:d2,setDeck:setD2,cl:p2Color},
         ]).map(pl=>(
           <div key={pl.who} style={{...S.current.card,borderLeft:`4px solid ${pl.cl}`,marginBottom:12}}>
-            <p style={{fontSize:13,fontWeight:800,color:pl.cl,marginBottom:8}}>{pl.name}</p>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+              <p style={{fontSize:13,fontWeight:800,color:pl.cl,margin:0}}>{pl.name}</p>
+              {challongeSlug && pl.name && (() => {
+                const loaded = pl.who === 1 ? preregLoadedForP1 : preregLoadedForP2;
+                const st = preregStatus[pl.name];
+                if (loaded) return <span style={{fontSize:10,fontWeight:700,color:"#15803D",background:"#F0FDF4",border:"1px solid #86EFAC",borderRadius:12,padding:"2px 8px"}}>✓ Prereg loaded</span>;
+                if (st === "loading") return <span style={{fontSize:10,color:"var(--text-muted)"}}>⏳</span>;
+                if (st === "empty") return <span style={{fontSize:10,color:"var(--text-muted)",fontStyle:"italic"}}>No prereg</span>;
+                if (st === "error") return <span style={{fontSize:10,color:"#DC2626"}}>Fetch failed</span>;
+                return (
+                  <button type="button" onClick={() => void loadPrereg(pl.who)}
+                    style={{fontSize:10,fontWeight:700,padding:"4px 10px",borderRadius:6,border:"1px solid var(--border)",background:"var(--surface)",color:pl.cl,cursor:"pointer",fontFamily:"'Outfit',sans-serif"}}>
+                    Load Prereg
+                  </button>
+                );
+              })()}
+            </div>
             {[0,1,2].map(slot=>(
               <div key={slot} style={{marginBottom:slot<2?8:0}}>
                 <p style={{fontSize:10,fontWeight:700,color:"var(--text-muted)",letterSpacing:1,marginBottom:4}}>{comboNames[slot].toUpperCase()} COMBO</p>

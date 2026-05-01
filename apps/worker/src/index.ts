@@ -6,6 +6,7 @@
  *   GET  /list                     → cached tournaments metadata (slug, count, ageSeconds)
  *   POST /delete                   → remove a slug from cache (body: {slug})
  *   GET  /matches?slug=X           → open Challonge matches for slug
+ *   GET  /standings?slug=X         → aggregated per-player W/L/points standings
  *   POST /submit                   → submit a match score to Challonge (gated by PIN in tournament mode)
  *                                     body: {slug, matchId, scores_csv, winner_id, pin?}
  *   POST /overlay/push             → write overlay state for a slot (body: {slot, state})
@@ -13,10 +14,21 @@
  *   GET  /overlay/state?slot=N     → current overlay state (one-shot)
  *   POST /combos/push              → cache a player's combos (body: {player, combos, updatedAt})
  *   GET  /combos/get?player=X      → fetch a player's cached combos
+ *   POST /combos/prereg            → player: submit 3 combos for a tournament (body: {slug, playerName, combos})
+ *   GET  /combos/prereg?slug=X&player=Y → judge/player: retrieve preregistered combos
+ *
+ *   Tournament + approval:
+ *   POST /tournament/create        → organizer: create Challonge tournament (body: {masterKey, name, urlSlug, ...})
+ *   POST /approval/set             → organizer: toggle approval mode (body: {slug, enabled, masterKey})
+ *   GET  /approval/status?slug=X   → public: is approval mode on?
+ *   POST /approval/list            → organizer: list pending submissions (body: {slug, masterKey})
+ *   POST /approval/decide          → organizer: approve or reject (body: {slug, id, decision, masterKey})
  *
  *   Auth-related:
  *   POST /pin/set                  → organizer: set/update tournament PIN
  *                                     body: {slug, pin, masterKey}
+ *   POST /admin/verify             → organizer: verify master key (no side effects)
+ *                                     body: {masterKey}
  *   POST /pin/verify               → judge: verify PIN for a slug (rate-limited)
  *                                     body: {slug, pin}
  *                                     response: {ok: boolean, sessionToken?: string}
@@ -292,6 +304,154 @@ async function handleMatches(env: Env, slug: string): Promise<Response> {
   return jsonResponse({ matches });
 }
 
+// GET /standings?slug=X — fetch participants + all matches, aggregate into
+// per-player W/L/points/SoS. Challonge's own standings computation isn't
+// exposed via v1 API, so we compute it client-side-ish here.
+async function handleStandings(env: Env, slug: string): Promise<Response> {
+  if (!slug) return jsonResponse({ errors: ["slug required"] }, 400);
+
+  // Pull participants (use cache if fresh).
+  let participants: unknown[] = [];
+  const cached = await env.TOURNEY_KV.get(`tourney:${slug}`);
+  if (cached) {
+    try {
+      const entry = JSON.parse(cached) as { participants: unknown[]; fetchedAt: number };
+      if (Date.now() - entry.fetchedAt < TOURNAMENT_CACHE_TTL_MS) {
+        participants = entry.participants;
+      }
+    } catch { /* fall through */ }
+  }
+  if (participants.length === 0) {
+    const pRes = await fetch(
+      `https://api.challonge.com/v1/tournaments/${encodeURIComponent(slug)}/participants.json?api_key=${env.CHALLONGE_API_KEY}`
+    );
+    if (!pRes.ok) {
+      const text = await pRes.text();
+      return jsonResponse({ errors: [`Challonge HTTP ${pRes.status}: ${text.slice(0, 200)}`] }, pRes.status);
+    }
+    const data = await pRes.json();
+    if (Array.isArray(data)) participants = data;
+  }
+
+  // Pull ALL matches (all states).
+  const mRes = await fetch(
+    `https://api.challonge.com/v1/tournaments/${encodeURIComponent(slug)}/matches.json?api_key=${env.CHALLONGE_API_KEY}`
+  );
+  if (!mRes.ok) {
+    const text = await mRes.text();
+    return jsonResponse({ errors: [`Challonge HTTP ${mRes.status}: ${text.slice(0, 200)}`] }, mRes.status);
+  }
+  const mRaw = await mRes.json();
+  const matches = Array.isArray(mRaw) ? mRaw : [];
+
+  // Index participants by id.
+  interface PRow { id: number; name: string; wins: number; losses: number; points: number; }
+  const pById = new Map<number, PRow>();
+  for (const p of participants) {
+    if (typeof p === "object" && p !== null && "participant" in p) {
+      const pw = (p as { participant: { id?: number; display_name?: string; name?: string } }).participant;
+      if (pw.id !== undefined) {
+        pById.set(pw.id, {
+          id: pw.id,
+          name: pw.display_name || pw.name || "",
+          wins: 0,
+          losses: 0,
+          points: 0,
+        });
+      }
+    }
+  }
+
+  // Walk completed matches, tally.
+  let totalComplete = 0;
+  for (const m of matches) {
+    const mw = (m as {
+      match: {
+        state: string;
+        winner_id: number | null;
+        loser_id: number | null;
+        player1_id: number | null;
+        player2_id: number | null;
+        scores_csv?: string;
+      };
+    }).match;
+    if (mw.state !== "complete" || !mw.winner_id || !mw.loser_id) continue;
+    totalComplete++;
+    const winner = pById.get(mw.winner_id);
+    const loser = pById.get(mw.loser_id);
+    if (winner) winner.wins += 1;
+    if (loser) loser.losses += 1;
+    // Accumulate total points scored per player from scores_csv.
+    if (mw.scores_csv && mw.player1_id !== null && mw.player2_id !== null) {
+      const p1 = pById.get(mw.player1_id);
+      const p2 = pById.get(mw.player2_id);
+      const setScores = mw.scores_csv.split(",").map(s => s.trim().split("-").map(Number));
+      for (const [s1, s2] of setScores) {
+        if (typeof s1 === "number" && !isNaN(s1) && p1) p1.points += s1;
+        if (typeof s2 === "number" && !isNaN(s2) && p2) p2.points += s2;
+      }
+    }
+  }
+
+  // Sort: wins desc, then losses asc, then points desc.
+  const standings = [...pById.values()].sort((a, b) => {
+    if (b.wins !== a.wins) return b.wins - a.wins;
+    if (a.losses !== b.losses) return a.losses - b.losses;
+    return b.points - a.points;
+  });
+
+  return jsonResponse({ standings, totalComplete, totalMatches: matches.length });
+}
+
+// POST /tournament/create — organizer-only: create a Challonge tournament
+// under the shared NC BLAST account. Optionally set a PIN and mark approval mode.
+async function handleTournamentCreate(env: Env, body: unknown): Promise<Response> {
+  if (typeof body !== "object" || body === null) return jsonResponse({ errors: ["invalid body"] }, 400);
+  const b = body as {
+    masterKey?: string;
+    name?: string;
+    urlSlug?: string;
+    tournamentType?: "single_elimination" | "double_elimination" | "round_robin" | "swiss";
+    pin?: string;
+    approvalMode?: boolean;
+  };
+  if (!constantTimeEquals(String(b.masterKey || ""), env.ORGANIZER_MASTER_KEY)) {
+    return jsonResponse({ errors: ["invalid master key"] }, 401);
+  }
+  const name = String(b.name || "").trim();
+  const urlSlug = String(b.urlSlug || "").trim();
+  const tType = b.tournamentType || "swiss";
+  if (!name || !urlSlug) {
+    return jsonResponse({ errors: ["name and urlSlug required"] }, 400);
+  }
+  if (!/^[a-zA-Z0-9_-]{3,60}$/.test(urlSlug)) {
+    return jsonResponse({ errors: ["urlSlug must be 3-60 chars, a-z/0-9/_/- only"] }, 400);
+  }
+  // Forward to Challonge.
+  const form = new URLSearchParams();
+  form.set("api_key", env.CHALLONGE_API_KEY);
+  form.set("tournament[name]", name);
+  form.set("tournament[url]", urlSlug);
+  form.set("tournament[tournament_type]", tType);
+  const res = await fetch("https://api.challonge.com/v1/tournaments.json", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString(),
+  });
+  const challongeBody = await res.text();
+  if (!res.ok) {
+    return jsonResponse({ errors: [`Challonge HTTP ${res.status}: ${challongeBody.slice(0, 300)}`] }, res.status);
+  }
+  // On success, optionally set PIN and approval mode.
+  if (b.pin && /^[0-9]{4,8}$/.test(String(b.pin))) {
+    await setStoredPin(env, urlSlug, String(b.pin));
+  }
+  if (b.approvalMode === true) {
+    await env.TOURNEY_KV.put(`approval:${urlSlug}`, "1");
+  }
+  return jsonResponse({ ok: true, slug: urlSlug, url: `https://challonge.com/${urlSlug}` });
+}
+
 // POST /submit — score submission, PIN-gated.
 async function handleSubmit(request: Request, env: Env, body: unknown): Promise<Response> {
   if (typeof body !== "object" || body === null) {
@@ -334,6 +494,20 @@ async function handleSubmit(request: Request, env: Env, body: unknown): Promise<
         return jsonResponse({ errors: ["Invalid PIN"] }, 401);
       }
     }
+  }
+
+  // Approval-mode gate: if this slug has approval mode on, queue the
+  // submission for organizer review instead of forwarding to Challonge.
+  const approvalOn = !!(await env.TOURNEY_KV.get(`approval:${slug}`));
+  if (approvalOn) {
+    await enqueuePendingSubmission(env, slug, {
+      matchId,
+      scoresCsv,
+      winnerId,
+      submittedAt: Date.now(),
+      ip: request.headers.get("CF-Connecting-IP") || null,
+    });
+    return jsonResponse({ ok: true, pending: true, message: "Queued for organizer approval." });
   }
 
   // Forward to Challonge.
@@ -396,6 +570,20 @@ async function handlePinSet(env: Env, body: unknown): Promise<Response> {
     return jsonResponse({ errors: ["PIN must be 4-8 digits"] }, 400);
   }
   await setStoredPin(env, slug, pin);
+  return jsonResponse({ ok: true });
+}
+
+// POST /admin/verify — check a master key without any side effect. Used by
+// the client to cache the key in sessionStorage after a single validation
+// instead of making the organizer type it into every form.
+async function handleAdminVerify(env: Env, body: unknown): Promise<Response> {
+  if (typeof body !== "object" || body === null) return jsonResponse({ errors: ["invalid body"] }, 400);
+  const b = body as { masterKey?: string };
+  const masterKey = String(b.masterKey || "");
+  if (!masterKey) return jsonResponse({ ok: false, errors: ["masterKey required"] }, 400);
+  if (!constantTimeEquals(masterKey, env.ORGANIZER_MASTER_KEY)) {
+    return jsonResponse({ ok: false, errors: ["invalid master key"] }, 401);
+  }
   return jsonResponse({ ok: true });
 }
 
@@ -498,6 +686,170 @@ async function handleCombosGet(env: Env, player: string): Promise<Response> {
   catch { return jsonResponse({ combos: [], updatedAt: 0 }); }
 }
 
+// POST /combos/prereg — player: submit their 3 combos for a specific
+// tournament slug. No PIN gate (the player has to know the slug + their name;
+// malicious prereg-flooding is low-severity). Rate-limited per IP per slug.
+// body: {slug, playerName, combos: Combo[]}
+async function handleCombosPrereg(request: Request, env: Env, body: unknown): Promise<Response> {
+  if (typeof body !== "object" || body === null) return jsonResponse({ errors: ["invalid body"] }, 400);
+  const b = body as { slug?: string; playerName?: string; combos?: unknown };
+  const slug = String(b.slug || "").trim();
+  const playerName = String(b.playerName || "").trim();
+  if (!slug || !playerName || !Array.isArray(b.combos)) {
+    return jsonResponse({ errors: ["slug, playerName, combos required"] }, 400);
+  }
+  if (b.combos.length !== 3) {
+    return jsonResponse({ errors: ["exactly 3 combos required"] }, 400);
+  }
+  // Rate limit against the same rate-limit bucket used elsewhere.
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  if (!(await rateCheck(env, ip, `prereg:${slug}`))) {
+    return jsonResponse({ errors: ["Too many prereg attempts; try again later"] }, 429);
+  }
+  const key = `prereg:${slug}:${playerName.toLowerCase()}`;
+  await env.TOURNEY_KV.put(
+    key,
+    JSON.stringify({ playerName, combos: b.combos, submittedAt: Date.now() }),
+    { expirationTtl: 7 * 24 * 60 * 60 } // 7 days
+  );
+  return jsonResponse({ ok: true });
+}
+
+// GET /combos/prereg?slug=X&player=Y — retrieve a player's preregistered combos.
+async function handleCombosPreregGet(env: Env, slug: string, player: string): Promise<Response> {
+  if (!slug || !player) return jsonResponse({ errors: ["slug, player required"] }, 400);
+  const raw = await env.TOURNEY_KV.get(`prereg:${slug}:${player.toLowerCase()}`);
+  if (!raw) return jsonResponse({ combos: null });
+  try { return jsonResponse(JSON.parse(raw)); }
+  catch { return jsonResponse({ combos: null }); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approval queue (pending submissions per-slug)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PendingSubmission {
+  id: string; // random, used for approve/reject by id
+  matchId: number;
+  scoresCsv: string;
+  winnerId: number | null;
+  submittedAt: number;
+  ip: string | null;
+}
+
+async function enqueuePendingSubmission(
+  env: Env,
+  slug: string,
+  sub: Omit<PendingSubmission, "id">
+): Promise<string> {
+  const id = randomToken().slice(0, 16);
+  const key = `pending:${slug}`;
+  const raw = await env.TOURNEY_KV.get(key);
+  let list: PendingSubmission[] = [];
+  if (raw) {
+    try { list = JSON.parse(raw); } catch { /* ignore */ }
+  }
+  // Cap at 100 pending per slug to avoid unbounded growth.
+  list = [...list, { id, ...sub }].slice(-100);
+  await env.TOURNEY_KV.put(key, JSON.stringify(list), { expirationTtl: 7 * 24 * 60 * 60 });
+  return id;
+}
+
+async function listPendingSubmissions(env: Env, slug: string): Promise<PendingSubmission[]> {
+  const raw = await env.TOURNEY_KV.get(`pending:${slug}`);
+  if (!raw) return [];
+  try { return JSON.parse(raw); } catch { return []; }
+}
+
+async function removePendingSubmission(env: Env, slug: string, id: string): Promise<PendingSubmission | null> {
+  const list = await listPendingSubmissions(env, slug);
+  const found = list.find(p => p.id === id) || null;
+  const remaining = list.filter(p => p.id !== id);
+  await env.TOURNEY_KV.put(`pending:${slug}`, JSON.stringify(remaining), { expirationTtl: 7 * 24 * 60 * 60 });
+  return found;
+}
+
+// POST /approval/set — organizer: toggle approval mode for a slug.
+// body: {slug, enabled, masterKey}
+async function handleApprovalSet(env: Env, body: unknown): Promise<Response> {
+  if (typeof body !== "object" || body === null) return jsonResponse({ errors: ["invalid body"] }, 400);
+  const b = body as { slug?: string; enabled?: boolean; masterKey?: string };
+  if (!constantTimeEquals(String(b.masterKey || ""), env.ORGANIZER_MASTER_KEY)) {
+    return jsonResponse({ errors: ["invalid master key"] }, 401);
+  }
+  const slug = String(b.slug || "");
+  if (!slug) return jsonResponse({ errors: ["slug required"] }, 400);
+  if (b.enabled) await env.TOURNEY_KV.put(`approval:${slug}`, "1");
+  else await env.TOURNEY_KV.delete(`approval:${slug}`);
+  return jsonResponse({ ok: true, enabled: !!b.enabled });
+}
+
+// GET /approval/status?slug=X — is approval mode on? (no auth needed; public)
+async function handleApprovalStatus(env: Env, slug: string): Promise<Response> {
+  if (!slug) return jsonResponse({ errors: ["slug required"] }, 400);
+  const enabled = !!(await env.TOURNEY_KV.get(`approval:${slug}`));
+  return jsonResponse({ enabled });
+}
+
+// POST /approval/list — organizer: list pending submissions for a slug.
+// body: {slug, masterKey}
+async function handleApprovalList(env: Env, body: unknown): Promise<Response> {
+  if (typeof body !== "object" || body === null) return jsonResponse({ errors: ["invalid body"] }, 400);
+  const b = body as { slug?: string; masterKey?: string };
+  if (!constantTimeEquals(String(b.masterKey || ""), env.ORGANIZER_MASTER_KEY)) {
+    return jsonResponse({ errors: ["invalid master key"] }, 401);
+  }
+  const slug = String(b.slug || "");
+  if (!slug) return jsonResponse({ errors: ["slug required"] }, 400);
+  const pending = await listPendingSubmissions(env, slug);
+  return jsonResponse({ pending });
+}
+
+// POST /approval/decide — organizer: approve (forward to Challonge) or reject
+// a pending submission. body: {slug, id, decision: "approve"|"reject", masterKey}
+async function handleApprovalDecide(env: Env, body: unknown): Promise<Response> {
+  if (typeof body !== "object" || body === null) return jsonResponse({ errors: ["invalid body"] }, 400);
+  const b = body as { slug?: string; id?: string; decision?: string; masterKey?: string };
+  if (!constantTimeEquals(String(b.masterKey || ""), env.ORGANIZER_MASTER_KEY)) {
+    return jsonResponse({ errors: ["invalid master key"] }, 401);
+  }
+  const slug = String(b.slug || "");
+  const id = String(b.id || "");
+  const decision = b.decision === "approve" ? "approve" : "reject";
+  if (!slug || !id) return jsonResponse({ errors: ["slug, id required"] }, 400);
+  const sub = await removePendingSubmission(env, slug, id);
+  if (!sub) return jsonResponse({ errors: ["not found"] }, 404);
+  if (decision === "reject") {
+    await auditLog(env, slug, { action: "reject", matchId: sub.matchId, scoresCsv: sub.scoresCsv });
+    return jsonResponse({ ok: true, decision: "reject" });
+  }
+  // Approve: forward to Challonge.
+  const form = new URLSearchParams();
+  form.set("api_key", env.CHALLONGE_API_KEY);
+  form.set("match[scores_csv]", sub.scoresCsv);
+  if (sub.winnerId !== null) form.set("match[winner_id]", String(sub.winnerId));
+  const url = `https://api.challonge.com/v1/tournaments/${encodeURIComponent(slug)}/matches/${sub.matchId}.json`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString(),
+  });
+  const challongeBody = await res.text();
+  if (!res.ok) {
+    // Re-queue on failure so organizer can retry.
+    await enqueuePendingSubmission(env, slug, {
+      matchId: sub.matchId,
+      scoresCsv: sub.scoresCsv,
+      winnerId: sub.winnerId,
+      submittedAt: sub.submittedAt,
+      ip: sub.ip,
+    });
+    return jsonResponse({ errors: [`Challonge HTTP ${res.status}: ${challongeBody.slice(0, 200)}`] }, res.status);
+  }
+  await auditLog(env, slug, { action: "approve", matchId: sub.matchId, scoresCsv: sub.scoresCsv });
+  return jsonResponse({ ok: true, decision: "approve" });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Audit log (append-only, capped, per slug)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -555,11 +907,34 @@ export default {
         const slug = url.searchParams.get("slug") || "";
         return await handleMatches(env, slug);
       }
+      if (url.pathname === "/standings" && method === "GET") {
+        const slug = url.searchParams.get("slug") || "";
+        return await handleStandings(env, slug);
+      }
       if (url.pathname === "/submit" && method === "POST") {
         return await handleSubmit(request, env, body);
       }
       if (url.pathname === "/pin/set" && method === "POST") {
         return await handlePinSet(env, body);
+      }
+      if (url.pathname === "/admin/verify" && method === "POST") {
+        return await handleAdminVerify(env, body);
+      }
+      if (url.pathname === "/tournament/create" && method === "POST") {
+        return await handleTournamentCreate(env, body);
+      }
+      if (url.pathname === "/approval/set" && method === "POST") {
+        return await handleApprovalSet(env, body);
+      }
+      if (url.pathname === "/approval/status" && method === "GET") {
+        const slug = url.searchParams.get("slug") || "";
+        return await handleApprovalStatus(env, slug);
+      }
+      if (url.pathname === "/approval/list" && method === "POST") {
+        return await handleApprovalList(env, body);
+      }
+      if (url.pathname === "/approval/decide" && method === "POST") {
+        return await handleApprovalDecide(env, body);
       }
       if (url.pathname === "/pin/verify" && method === "POST") {
         return await handlePinVerify(request, env, body);
@@ -584,6 +959,14 @@ export default {
       if (url.pathname === "/combos/get" && method === "GET") {
         const player = url.searchParams.get("player") || "";
         return await handleCombosGet(env, player);
+      }
+      if (url.pathname === "/combos/prereg" && method === "POST") {
+        return await handleCombosPrereg(request, env, body);
+      }
+      if (url.pathname === "/combos/prereg" && method === "GET") {
+        const s = url.searchParams.get("slug") || "";
+        const p = url.searchParams.get("player") || "";
+        return await handleCombosPreregGet(env, s, p);
       }
 
       return jsonResponse({ errors: ["route not found"] }, 404);

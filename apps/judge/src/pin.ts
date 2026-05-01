@@ -133,3 +133,43 @@ export async function setPin(
     return { ok: false, message: "Could not reach the NC BLAST server." };
   }
 }
+
+// ─── Organizer master-key session cache ─────────────────────────────────────
+// Once validated against /admin/verify, cache the key in sessionStorage so the
+// organizer doesn't re-type it for every PIN/setup action. Clears on tab close.
+
+const MASTER_KEY_STORAGE = "ncblast-org-master";
+
+export function getCachedMasterKey(): string | null {
+  try { return sessionStorage.getItem(MASTER_KEY_STORAGE); } catch { return null; }
+}
+
+export function clearCachedMasterKey(): void {
+  try { sessionStorage.removeItem(MASTER_KEY_STORAGE); } catch { /* ignore */ }
+}
+
+/**
+ * Verify an organizer master key against the Worker. On success, cache it in
+ * sessionStorage for subsequent organizer calls.
+ */
+export async function verifyMasterKey(
+  key: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!key) return { ok: false, message: "Master key required." };
+  try {
+    const res = await fetch(`${WORKER_BASE_URL}/admin/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ masterKey: key }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      try { sessionStorage.setItem(MASTER_KEY_STORAGE, key); } catch { /* ignore */ }
+      return { ok: true };
+    }
+    if (res.status === 401) return { ok: false, message: "Invalid master key." };
+    return { ok: false, message: `HTTP ${res.status}` };
+  } catch {
+    return { ok: false, message: "Could not reach the NC BLAST server." };
+  }
+}
