@@ -4,7 +4,7 @@ import { sSave, STORAGE_KEYS as KEYS, WORKER_BASE_URL } from "@ncblast/shared";
 import { S } from "../styles";
 import { IC } from "../components/Icons";
 import { TournamentBadge } from "../components/TournamentBadge";
-import { tn } from "../utils";
+import { tn, normalizeChallongeSlug } from "../utils";
 import { getSessionToken, verifyPin } from "../pin";
 
 type ChallongeStatus = null | "loading" | "ok" | "error";
@@ -227,18 +227,7 @@ export function PlayersScreen({ players, setPlayers, onNext, onBack, onChallonge
 
   const importChallonge = async () => {
     const raw = challongeUrl.trim();
-    let slug = "";
-    try {
-      const url = new URL(raw.startsWith("http") ? raw : "https://"+raw);
-      const cleanPath = url.pathname.replace(/\/(participants|standings|teams|matches).*$/i,"");
-      const parts = cleanPath.replace(/^\/|\/$/g,"").split("/").filter(Boolean);
-      const subdomain = url.hostname.split(".")[0];
-      const isCommunity = subdomain !== "challonge" && subdomain !== "www";
-      const pathSlug = parts[parts.length-1] || parts[0];
-      slug = isCommunity ? `${subdomain}-${pathSlug}` : pathSlug;
-    } catch {
-      slug = raw.replace(/.*challonge\.com\//,"").replace(/\/(participants|standings).*/i,"").replace(/\/$/,"").split("/").pop() || "";
-    }
+    const slug = normalizeChallongeSlug(raw);
     if(!slug){ setChallongeStatus("error"); setChallongeMsg("Couldn't read a tournament slug from that URL."); return; }
 
     setChallongeStatus("loading"); setChallongeMsg("Checking NC BLAST server cache...");

@@ -81,7 +81,11 @@ async function claimFlusherLease(): Promise<boolean> {
  * MAIN APP — BeyJudgeApp. Hosts the screen router, dark mode, library modal,
  * scale hook, Challonge context, and the Sheets/CSV/offline-queue handlers.
  */
-export function BeyJudgeApp() {
+/**
+ * Judge flow — the scoring app. Under `/judge` in the router.
+ * The `BeyJudgeApp` alias is kept for the existing main.tsx import compatibility.
+ */
+export function JudgeApp() {
   const sc = useScale();
   S.current = makeS(sc); // update module-level S so all components see it
   const [dark, toggleDark] = useDarkMode();
@@ -300,3 +304,37 @@ export function BeyJudgeApp() {
     </div>
   );
 }
+
+// ─── Top-level router ─────────────────────────────────────────────────────
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { LandingScreen } from "./screens/LandingScreen";
+import { OrganizerScreen } from "./screens/OrganizerScreen";
+import { PlayerScreen } from "./screens/PlayerScreen";
+
+/**
+ * Thin wrapper so Landing/Organizer/Player screens get the same scale-based
+ * style injection the judge flow gets. Each route mounts this, which
+ * refreshes `S.current` via the useScale hook before rendering.
+ */
+function StyledRoute({ children }: { children: React.ReactNode }) {
+  const sc = useScale();
+  S.current = makeS(sc);
+  return <>{children}</>;
+}
+
+export function AppRouter() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<StyledRoute><LandingScreen /></StyledRoute>} />
+        <Route path="/judge" element={<JudgeApp />} />
+        <Route path="/organizer" element={<StyledRoute><OrganizerScreen /></StyledRoute>} />
+        <Route path="/player" element={<StyledRoute><PlayerScreen /></StyledRoute>} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+/** Backward-compat alias — main.tsx still imports `BeyJudgeApp`. */
+export const BeyJudgeApp = AppRouter;

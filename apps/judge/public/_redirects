@@ -1,0 +1,3 @@
+# SPA fallback for BrowserRouter: any non-file path serves index.html.
+# Cloudflare Pages + Netlify both honor this format.
+/*    /index.html   200
