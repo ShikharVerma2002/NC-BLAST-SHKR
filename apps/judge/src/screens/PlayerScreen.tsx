@@ -5,7 +5,7 @@ import type { Combo } from "@ncblast/shared";
 import { S } from "../styles";
 import { IC } from "../components/Icons";
 import { normalizeChallongeSlug } from "../utils";
-import { DEFAULT_PARTS } from "../data/parts";
+import { DEFAULT_PARTS, CROSSOVER_BLADES, CX_CHIPS, CX_BLADES, CXE_BLADES, CXE_OVER_BLADES, CX_ASSISTS } from "../data/parts";
 import { submitPreregCombos, getPreregCombos } from "../orgClient";
 
 interface StandingRow {
@@ -296,35 +296,129 @@ export function PlayerScreen() {
     </div>
   );
 }
-
 // ─── Combo preregistration card ────────────────────────────────────────────
+
+type ComboType = "standard" | "cx" | "cxe";
+
+interface DraftCombo {
+  type: ComboType;
+  // Standard fields:
+  blade: string | null;
+  // CX fields (also used by CXE):
+  chip: string | null;    // "Standard" | "Emperor" | "Valkyrie"
+  cxBlade: string | null; // CX_BLADES entry (e.g. "Blast")
+  // CXE-only extra:
+  overBlade: string | null; // "Break" | "Guard" | "Flow"
+  assist: string | null; // CX_ASSISTS entry (e.g. "Heavy")
+  // Shared:
+  ratchet: string | null;
+  bit: string | null;
+}
+
+const emptyDraft = (): DraftCombo => ({
+  type: "standard",
+  blade: null,
+  chip: null,
+  cxBlade: null,
+  overBlade: null,
+  assist: null,
+  ratchet: null,
+  bit: null,
+});
+
+// Compose the final blade display string following the judge picker's naming rules:
+//   Standard chip is omitted:  "Blast Heavy"         (CX)   or "Blitz Break Heavy"          (CXE)
+//   Named chip is prefixed:    "Emperor Blast Heavy" (CX)   or "Emperor Blitz Break Heavy"  (CXE)
+function composeBladeName(d: DraftCombo): string | null {
+  if (d.type === "standard") return d.blade?.trim() || null;
+  const chip = d.chip;
+  const cxb = d.cxBlade;
+  const assist = d.assist;
+  if (!chip || !cxb || !assist) return null;
+  const chipPrefix = chip === "Standard" ? "" : `${chip} `;
+  if (d.type === "cx") {
+    return `${chipPrefix}${cxb} ${assist}`;
+  }
+  // CXE
+  const over = d.overBlade;
+  if (!over) return null;
+  return `${chipPrefix}${cxb} ${over} ${assist}`;
+}
+
+// Inverse of composeBladeName: try to parse a Combo.blade string back into a
+// DraftCombo so "Load" can round-trip CX/CXE combos into the editor. If the
+// string doesn't cleanly match a CX/CXE pattern, fall back to standard.
+function parseBladeName(blade: string | null): Pick<DraftCombo, "type" | "blade" | "chip" | "cxBlade" | "overBlade" | "assist"> {
+  if (!blade) return { type: "standard", blade: null, chip: null, cxBlade: null, overBlade: null, assist: null };
+  const tokens = blade.split(" ").filter(Boolean);
+  const firstIsNamedChip = tokens[0] === "Emperor" || tokens[0] === "Valkyrie";
+  const chip = firstIsNamedChip ? tokens[0] : "Standard";
+  const rest = firstIsNamedChip ? tokens.slice(1) : tokens;
+  // CXE: rest is [CXE_BLADES, CXE_OVER_BLADES, Assist]  → 3 tokens
+  if (rest.length === 3 && CXE_BLADES.includes(rest[0]) && CXE_OVER_BLADES.includes(rest[1]) && CX_ASSISTS.includes(rest[2])) {
+    return { type: "cxe", blade: null, chip, cxBlade: rest[0], overBlade: rest[1], assist: rest[2] };
+  }
+  // CX: rest is [CX_BLADES, Assist]  → 2 tokens
+  if (rest.length === 2 && CX_BLADES.includes(rest[0]) && CX_ASSISTS.includes(rest[1])) {
+    return { type: "cx", blade: null, chip, cxBlade: rest[0], overBlade: null, assist: rest[1] };
+  }
+  return { type: "standard", blade, chip: null, cxBlade: null, overBlade: null, assist: null };
+}
 
 function ComboPreregCard({ slug }: { slug: string }) {
   const [playerName, setPlayerName] = useState("");
-  const [combos, setCombos] = useState<Combo[]>([
-    { blade: null, ratchet: null, bit: null },
-    { blade: null, ratchet: null, bit: null },
-    { blade: null, ratchet: null, bit: null },
-  ]);
+  const [drafts, setDrafts] = useState<DraftCombo[]>([emptyDraft(), emptyDraft(), emptyDraft()]);
   const [status, setStatus] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
   const [loadedExisting, setLoadedExisting] = useState(false);
 
-  const setComboField = (i: number, field: keyof Combo, v: string): void => {
-    setCombos(prev => {
+  const updateDraft = (i: number, patch: Partial<DraftCombo>): void => {
+    setDrafts(prev => {
       const next = [...prev];
-      next[i] = { ...next[i], [field]: v || null };
+      next[i] = { ...next[i], ...patch };
       return next;
     });
     setStatus(null);
   };
 
-  // Try to load any existing prereg for this (slug, player) to show the user
-  // what they previously submitted.
+  const setType = (i: number, type: ComboType): void => {
+    updateDraft(i, {
+      type,
+      // Reset type-specific fields on type change so we don't leak stale values.
+      blade: type === "standard" ? drafts[i].blade : null,
+      chip: type === "standard" ? null : (drafts[i].chip || "Standard"),
+      cxBlade: type === "standard" ? null : drafts[i].cxBlade,
+      overBlade: type === "cxe" ? drafts[i].overBlade : null,
+      assist: type === "standard" ? null : drafts[i].assist,
+    });
+  };
+
+  // Reconstruct the Combo[] that actually gets submitted.
+  const combos: Combo[] = drafts.map(d => ({
+    blade: composeBladeName(d),
+    ratchet: d.ratchet?.trim() || null,
+    bit: d.bit?.trim() || null,
+  }));
+
+  // Helper: per-player duplicate-part detection (judges' rule: no two combos
+  // on the same deck share a part). Prevents a valid prereg from being
+  // silently rejected by the judge picker later.
+  const usedBlades = combos.map(c => c.blade).filter(Boolean) as string[];
+  const usedRatchets = combos.map(c => c.ratchet).filter(Boolean) as string[];
+  const usedBits = combos.map(c => c.bit).filter(Boolean) as string[];
+  const hasDup = (xs: string[]): boolean => new Set(xs).size !== xs.length;
+  const dupBladeCollision = hasDup(usedBlades);
+  const dupRatchetCollision = hasDup(usedRatchets);
+  const dupBitCollision = hasDup(usedBits);
+
   const loadExisting = async (): Promise<void> => {
     if (!slug || !playerName.trim()) return;
     const result = await getPreregCombos(slug, playerName.trim());
     if (result.ok && result.combos && result.combos.length === 3) {
-      setCombos(result.combos);
+      const rebuilt: DraftCombo[] = result.combos.map(c => {
+        const parsed = parseBladeName(c.blade);
+        return { ...parsed, ratchet: c.ratchet, bit: c.bit };
+      });
+      setDrafts(rebuilt);
       setLoadedExisting(true);
       setStatus({ ok: true, msg: "Loaded your existing preregistered combos." });
     } else if (result.ok) {
@@ -343,7 +437,11 @@ function ComboPreregCard({ slug }: { slug: string }) {
     }
     const incomplete = combos.some(c => !c.blade || !c.ratchet || !c.bit);
     if (incomplete) {
-      setStatus({ ok: false, msg: "Fill in all 3 parts for each of the 3 combos." });
+      setStatus({ ok: false, msg: "Each combo needs a complete blade, ratchet, and bit." });
+      return;
+    }
+    if (dupBladeCollision || dupRatchetCollision || dupBitCollision) {
+      setStatus({ ok: false, msg: "No two combos on your deck can share a part." });
       return;
     }
     setStatus("loading");
@@ -355,13 +453,15 @@ function ComboPreregCard({ slug }: { slug: string }) {
     }
   };
 
-  const canSubmit = !!slug && playerName.trim() && combos.every(c => c.blade && c.ratchet && c.bit) && status !== "loading";
+  const allComplete = combos.every(c => c.blade && c.ratchet && c.bit);
+  const anyDup = dupBladeCollision || dupRatchetCollision || dupBitCollision;
+  const canSubmit = !!slug && playerName.trim() && allComplete && !anyDup && status !== "loading";
 
   return (
     <div style={{ ...S.current.card, borderLeft: "4px solid #A16207", padding: "14px 16px" }}>
       <h2 style={{ ...S.current.label, color: "#A16207", fontSize: 14 }}>Preregister Combos</h2>
       <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
-        Submit your 3 combos before the event. Your judge can load them instantly when your match starts instead of having you build them on their tablet.
+        Submit your 3 combos before the event so your judge can load them instantly. Supports standard, CX, and CXE builds.
       </p>
       {!slug && (
         <p style={{ fontSize: 11, color: "#DC2626", fontWeight: 600, marginBottom: 10 }}>
@@ -388,9 +488,11 @@ function ComboPreregCard({ slug }: { slug: string }) {
           Load
         </button>
       </div>
-      {/* 3 combos × 3 fields with datalists for autocomplete. */}
+
+      {/* Shared datalists for standard blades/ratchets/bits. */}
       <datalist id="prereg-blades">
         {DEFAULT_PARTS.blades.map(b => <option key={b} value={b} />)}
+        {CROSSOVER_BLADES.map(b => <option key={b} value={b} />)}
       </datalist>
       <datalist id="prereg-ratchets">
         {DEFAULT_PARTS.ratchets.map(r => <option key={r} value={r} />)}
@@ -398,18 +500,102 @@ function ComboPreregCard({ slug }: { slug: string }) {
       <datalist id="prereg-bits">
         {DEFAULT_PARTS.bits.map(b => <option key={b} value={b} />)}
       </datalist>
-      {combos.map((c, i) => (
-        <div key={i} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface2)" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
-            Combo {i + 1}
+
+      {drafts.map((d, i) => {
+        const composedBlade = composeBladeName(d);
+        return (
+          <div key={i} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface2)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                Combo {i + 1}
+              </span>
+              {/* Type selector */}
+              <div style={{ display: "flex", gap: 4 }}>
+                {(["standard", "cx", "cxe"] as const).map(t => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setType(i, t)}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 6,
+                      border: `1px solid ${d.type === t ? "#A16207" : "var(--border)"}`,
+                      background: d.type === t ? "#A16207" : "var(--surface)",
+                      color: d.type === t ? "#fff" : "var(--text-primary)",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      fontFamily: "'Outfit', sans-serif",
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                    }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Type-specific blade fields */}
+            {d.type === "standard" && (
+              <input
+                list="prereg-blades"
+                placeholder="Blade"
+                value={d.blade || ""}
+                onChange={e => updateDraft(i, { blade: e.target.value || null })}
+                style={{ width: "100%", padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-primary)", outline: "none", marginBottom: 6, boxSizing: "border-box" }}
+              />
+            )}
+            {d.type === "cx" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 6 }}>
+                <PickerSelect value={d.chip} options={CX_CHIPS} placeholder="Chip" onChange={v => updateDraft(i, { chip: v })} />
+                <PickerSelect value={d.cxBlade} options={CX_BLADES} placeholder="Blade" onChange={v => updateDraft(i, { cxBlade: v })} />
+                <PickerSelect value={d.assist} options={CX_ASSISTS} placeholder="Assist" onChange={v => updateDraft(i, { assist: v })} />
+              </div>
+            )}
+            {d.type === "cxe" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
+                <PickerSelect value={d.chip} options={CX_CHIPS} placeholder="Chip" onChange={v => updateDraft(i, { chip: v })} />
+                <PickerSelect value={d.cxBlade} options={CXE_BLADES} placeholder="CXE Blade" onChange={v => updateDraft(i, { cxBlade: v })} />
+                <PickerSelect value={d.overBlade} options={CXE_OVER_BLADES} placeholder="Over Blade" onChange={v => updateDraft(i, { overBlade: v })} />
+                <PickerSelect value={d.assist} options={CX_ASSISTS} placeholder="Assist" onChange={v => updateDraft(i, { assist: v })} />
+              </div>
+            )}
+
+            {/* Live preview of the composed blade name. */}
+            {(d.type === "cx" || d.type === "cxe") && composedBlade && (
+              <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 6, fontFamily: "'JetBrains Mono', monospace" }}>
+                → {composedBlade}
+              </div>
+            )}
+
+            {/* Shared ratchet + bit for all types. */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              <input
+                list="prereg-ratchets"
+                placeholder="Ratchet (e.g. 1-60)"
+                value={d.ratchet || ""}
+                onChange={e => updateDraft(i, { ratchet: e.target.value || null })}
+                style={{ padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-primary)", outline: "none", boxSizing: "border-box" }}
+              />
+              <input
+                list="prereg-bits"
+                placeholder="Bit"
+                value={d.bit || ""}
+                onChange={e => updateDraft(i, { bit: e.target.value || null })}
+                style={{ padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-primary)", outline: "none", boxSizing: "border-box" }}
+              />
+            </div>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <input list="prereg-blades" placeholder="Blade" value={c.blade || ""} onChange={e => setComboField(i, "blade", e.target.value)} style={{ padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-primary)", outline: "none" }} />
-            <input list="prereg-ratchets" placeholder="Ratchet (e.g. 1-60)" value={c.ratchet || ""} onChange={e => setComboField(i, "ratchet", e.target.value)} style={{ padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-primary)", outline: "none" }} />
-            <input list="prereg-bits" placeholder="Bit" value={c.bit || ""} onChange={e => setComboField(i, "bit", e.target.value)} style={{ padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-primary)", outline: "none" }} />
-          </div>
-        </div>
-      ))}
+        );
+      })}
+
+      {/* Duplicate-parts warning (judge rule: no part shared across a deck). */}
+      {anyDup && (
+        <p style={{ fontSize: 11, color: "#DC2626", fontWeight: 600, marginBottom: 8, textAlign: "center" }}>
+          ⚠ {dupBladeCollision ? "Duplicate blade" : dupRatchetCollision ? "Duplicate ratchet" : "Duplicate bit"} across your combos — judges require all 3 combos to use different parts.
+        </p>
+      )}
       {status && status !== "loading" && (
         <p style={{ fontSize: 12, fontWeight: 600, textAlign: "center", marginBottom: 10, color: status.ok ? "#15803D" : "#DC2626" }}>
           {status.msg}
@@ -429,5 +615,21 @@ function ComboPreregCard({ slug }: { slug: string }) {
         {status === "loading" ? "Saving…" : "Submit Prereg"}
       </button>
     </div>
+  );
+}
+
+// Small styled `<select>` wrapper. Takes null or string; null renders as placeholder.
+function PickerSelect({ value, options, placeholder, onChange }: { value: string | null; options: string[]; placeholder: string; onChange: (v: string | null) => void }) {
+  return (
+    <select
+      value={value || ""}
+      onChange={e => onChange(e.target.value || null)}
+      style={{ padding: "8px 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: value ? "var(--text-primary)" : "var(--text-muted)", outline: "none", fontFamily: "'Outfit', sans-serif", cursor: "pointer", boxSizing: "border-box" }}
+    >
+      <option value="">{placeholder}</option>
+      {options.map(o => (
+        <option key={o} value={o} style={{ color: "var(--text-primary)" }}>{o}</option>
+      ))}
+    </select>
   );
 }
