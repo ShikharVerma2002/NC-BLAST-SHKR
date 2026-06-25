@@ -1191,30 +1191,69 @@ async function handleAuthExchange(env: Env, body: unknown): Promise<Response> {
     return jsonResponse({ ok: false, error: "No access_token in Challonge response" }, 502);
   }
 
-  // Resolve username — Challonge's v2 /me endpoint.
+  // Resolve username. Challonge's OAuth /me has shifted shape over time —
+  // try v2.1 first, then v2, then v1 (which uses api_key auth instead of
+  // Bearer so it's a different request). For diagnostic purposes, surface
+  // the actual /me response when nothing parses.
   let username = "";
-  try {
-    const meRes = await fetch("https://api.challonge.com/v2.1/me", {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${challongeToken}`,
+  const diagnostics: { url: string; status: number; bodyPreview: string }[] = [];
+
+  const tryEndpoint = async (url: string, useBearer: boolean): Promise<void> => {
+    if (username) return;
+    try {
+      const headers: Record<string, string> = {
         "Accept": "application/json",
-        "Authorization-Type": "v2",
-      },
-    });
-    if (meRes.ok) {
-      const meData = await meRes.json();
-      // Challonge wraps in { data: { attributes: { username } } } per JSON:API.
-      // Fall back to common alternate shapes if that doesn't match.
+        // Challonge's API blocks Cloudflare-Workers default UA on some
+        // endpoints. Spoof a real browser UA so /me responds normally.
+        "User-Agent": "Mozilla/5.0 (compatible; NC-BLAST/1.0)",
+      };
+      if (useBearer) {
+        headers["Authorization"] = `Bearer ${challongeToken}`;
+        headers["Authorization-Type"] = "v2";
+      }
+      const finalUrl = useBearer
+        ? url
+        : `${url}${url.includes("?") ? "&" : "?"}api_key=${encodeURIComponent(challongeToken)}`;
+      const meRes = await fetch(finalUrl, { method: "GET", headers });
+      const bodyText = await meRes.text();
+      diagnostics.push({ url, status: meRes.status, bodyPreview: bodyText.slice(0, 300) });
+      if (!meRes.ok) return;
+      let meData: unknown;
+      try { meData = JSON.parse(bodyText); } catch { return; }
       const m = meData as Record<string, unknown>;
-      const fromJsonApi = (((m.data as Record<string, unknown>)?.attributes as Record<string, unknown>)?.username) as string | undefined;
-      const fromTopLevel = (m.username as string | undefined);
+      // Try several shapes Challonge has used:
+      //  v2 JSON:API → { data: { attributes: { username } } }
+      //  v2 alt     → { user: { username } }
+      //  v1         → { user: { username } } or { username }
+      //  oauth me   → { username } at top level
+      const fromJsonApi =
+        (((m.data as Record<string, unknown>)?.attributes as Record<string, unknown>)?.username) as string | undefined;
+      const fromTopLevel = m.username as string | undefined;
       const fromUser = ((m.user as Record<string, unknown>)?.username as string | undefined);
-      username = String(fromJsonApi || fromTopLevel || fromUser || "").trim();
+      // Some Challonge endpoints return name/email instead — last-resort fallback.
+      const fromName = m.name as string | undefined;
+      const fromEmail = m.email as string | undefined;
+      const candidate = String(fromJsonApi || fromTopLevel || fromUser || fromName || fromEmail || "").trim();
+      if (candidate) username = candidate;
+    } catch (e) {
+      diagnostics.push({ url, status: 0, bodyPreview: `fetch error: ${(e as Error).message}` });
     }
-  } catch { /* swallow — username remains empty */ }
+  };
+
+  // Try in this order — .json suffix versions first since plain /me has been
+  // observed to 404. v2 endpoints use Bearer, v1 uses api_key query param.
+  await tryEndpoint("https://api.challonge.com/v2/me.json", true);
+  await tryEndpoint("https://api.challonge.com/v2.1/me.json", true);
+  await tryEndpoint("https://api.challonge.com/v2/me", true);
+  await tryEndpoint("https://api.challonge.com/v2.1/me", true);
+  await tryEndpoint("https://api.challonge.com/v1/me.json", false);
+
   if (!username) {
-    return jsonResponse({ ok: false, error: "Couldn't read username from Challonge /me" }, 502);
+    return jsonResponse({
+      ok: false,
+      error: "Couldn't read username from Challonge /me",
+      debug: diagnostics, // ← attempt log for debugging
+    }, 502);
   }
 
   // Mint opaque token and persist to KV.

@@ -35,7 +35,7 @@ import "./styles.css";
     const sessionId = stateParam.split(".")[0] || "";
     const isPopup = !!window.opener && window.opener !== window;
 
-    const signalResult = (msg: { ok: boolean; token?: string; username?: string; error?: string }): void => {
+    const signalResult = (msg: { ok: boolean; token?: string; username?: string; error?: string; debug?: unknown }): void => {
       if (isPopup) {
         try {
           window.opener.postMessage(
@@ -85,9 +85,16 @@ import "./styles.css";
       }),
     })
       .then((r) => r.json())
-      .then((d: { ok: boolean; access_token?: string; username?: string; error?: string }) => {
+      .then((d: { ok: boolean; access_token?: string; username?: string; error?: string; debug?: unknown }) => {
         if (!d.ok || !d.access_token) {
-          signalResult({ ok: false, error: d.error || "Login failed" });
+          // Include diagnostics in the error message when present so the user
+          // can see exactly which Challonge endpoint failed and how, without
+          // having to open DevTools on the popup window.
+          let msg = d.error || "Login failed";
+          if (d.debug) {
+            try { msg += " · debug: " + JSON.stringify(d.debug); } catch { /* ignore */ }
+          }
+          signalResult({ ok: false, error: msg });
           return;
         }
         signalResult({ ok: true, token: d.access_token, username: d.username });

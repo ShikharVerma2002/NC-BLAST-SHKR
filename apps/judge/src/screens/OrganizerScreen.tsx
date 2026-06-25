@@ -149,10 +149,10 @@ export function OrganizerScreen() {
             Sign in with your Challonge account. NC BLAST will open a popup to Challonge for authorization.
           </p>
           {authError && (
-            <p style={{ fontSize: 12, color: "#DC2626", fontWeight: 600, marginBottom: 10, textAlign: "center" }}>{authError}</p>
+            <pre style={{ fontSize: 11, color: "#DC2626", fontWeight: 600, marginBottom: 10, textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word", background: "var(--surface2)", border: "1px solid #FCA5A5", borderRadius: 6, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace", maxHeight: 200, overflowY: "auto" }}>{authError}</pre>
           )}
           {auth.errorMsg && (
-            <p style={{ fontSize: 12, color: "#DC2626", fontWeight: 600, marginBottom: 10, textAlign: "center" }}>{auth.errorMsg}</p>
+            <pre style={{ fontSize: 11, color: "#DC2626", fontWeight: 600, marginBottom: 10, textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word", background: "var(--surface2)", border: "1px solid #FCA5A5", borderRadius: 6, padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace", maxHeight: 200, overflowY: "auto" }}>{auth.errorMsg}</pre>
           )}
           <button
             type="button"
