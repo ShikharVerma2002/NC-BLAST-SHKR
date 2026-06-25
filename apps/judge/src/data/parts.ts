@@ -65,9 +65,28 @@ export function mergeWithDefaults(saved: Partial<Parts>): Parts {
     const extras = (savedList || []).filter((x) => !defaults.includes(x)).sort();
     return [...new Set([...defaults, ...extras])];
   }
+  // Bit-name migration: standalone NC BLAST stores bits with spaces ("Low Rush"),
+  // but the React judge UI uses dashes ("Low-Rush") so multi-word bit labels can
+  // wrap cleanly across two lines on small judge tablets. When a user opens the
+  // React app after building combos in the standalone, normalize their saved
+  // bit list to the dash form so equality checks (used parts, prereg, history)
+  // continue to work.
+  const migratedBits = (saved.bits || []).map(migrateBitName);
   return {
     blades: mergeList(DEFAULT_PARTS.blades, saved.blades),
     ratchets: mergeList(DEFAULT_PARTS.ratchets, saved.ratchets),
-    bits: mergeList(DEFAULT_PARTS.bits, saved.bits),
+    bits: mergeList(DEFAULT_PARTS.bits, migratedBits),
   };
+}
+
+/** Convert a bit name from the standalone's space form ("Low Rush") to the
+ * React app's dash form ("Low-Rush"). Idempotent — passes through any name
+ * that's already in dash form, single-word, or unrecognized. */
+export function migrateBitName(bit: string): string {
+  if (!bit || !bit.includes(" ")) return bit;
+  const dashed = bit.replace(/\s+/g, "-");
+  // Only commit the migration if the result is a known default bit. This
+  // avoids accidentally rewriting user-added custom bits that legitimately
+  // use spaces.
+  return DEFAULT_PARTS.bits.includes(dashed) ? dashed : bit;
 }

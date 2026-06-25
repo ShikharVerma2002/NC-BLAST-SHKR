@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { MatchConfig, Parts, LogEntry, ChallongeParticipantMap, SubmissionQueueItem } from "@ncblast/shared";
+import type { MatchConfig, Parts, LogEntry, ChallongeParticipantMap, SubmissionQueueItem, Combo } from "@ncblast/shared";
 import { sGet, sSave, STORAGE_KEYS as KEYS, SHEETS_URL, WORKER_BASE_URL } from "@ncblast/shared";
 import { FormatScreen } from "./screens/FormatScreen";
 import { PlayersScreen } from "./screens/PlayersScreen";
@@ -9,7 +9,7 @@ import { LibraryManager } from "./components/LibraryManager";
 import { useScale } from "./hooks/useScale";
 import { useDarkMode } from "./hooks/useDarkMode";
 // useRefreshGuard moved into MatchScreen (scoped to active battle/deck phases).
-import { mergeWithDefaults } from "./data/parts";
+import { mergeWithDefaults, migrateBitName } from "./data/parts";
 import { makeS, S } from "./styles";
 import { comboStr } from "./utils";
 import { enqueue, remove as removeFromQueue, list as listQueue } from "./submitQueue";
@@ -105,6 +105,27 @@ export function JudgeApp() {
     const saved=sGet(KEYS.parts, {} as Partial<Parts>);
     const merged=mergeWithDefaults(saved);
     setParts(merged); sSave(KEYS.parts,merged);
+    // One-shot migration of stored combos: rewrite bit names from the
+    // standalone's space form ("Low Rush") to React's dash form ("Low-Rush")
+    // so existing user combos remain queryable. Idempotent — running again
+    // on already-migrated data is a no-op. See migrateBitName() in parts.ts.
+    try {
+      const savedCombos = sGet(KEYS.combos, {} as Record<string, Combo[]>);
+      let mutated = false;
+      for (const name of Object.keys(savedCombos)) {
+        const list = savedCombos[name];
+        if (!Array.isArray(list)) continue;
+        savedCombos[name] = list.map((c) => {
+          if (!c?.bit) return c;
+          const migrated = migrateBitName(c.bit);
+          if (migrated !== c.bit) { mutated = true; return { ...c, bit: migrated }; }
+          return c;
+        });
+      }
+      if (mutated) sSave(KEYS.combos, savedCombos);
+    } catch {
+      // Ignore — migration is best-effort; bad data won't crash boot.
+    }
     setPlayers(sGet(KEYS.players, [] as string[]));
     // Restore last Challonge tournament context
     const savedMap = sGet(KEYS.challongeMap, {} as { slug?: string; participants?: ChallongeParticipantMap });

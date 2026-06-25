@@ -32,14 +32,20 @@ export const PENALTY: Finish[] = [
   { id: "LER", p: 1, name: "Launch Error", penalty: true },
 ];
 
-/** Display labels for finish banner (overlay.html). */
+/** Display labels for finish banner (overlay).
+ *
+ * These are the BIG text only — the smaller "OPPONENT PENALTY" / "<NAME> SCORES"
+ * line is composed dynamically in apps/overlay/src/App.tsx since it depends on
+ * scorerIdx semantics (committer vs gainer) per finish type.
+ */
 export const FINISH_LABELS: Record<string, string> = {
   XTR: "XTREME",
   OVR: "OVER",
   BST: "BURST",
-  OF: "OUT OF BOUNDS",
-  OF2: "OUT — P2 PENALTY",
-  OF3: "OUT — P1 PENALTY",
+  SPF: "SPIN",
+  OF2: "OWN FINISH",
+  OF3: "OWN FINISH",
+  LER: "LAUNCH ERROR",
   "LER-STRIKE": "LER STRIKE",
 };
 

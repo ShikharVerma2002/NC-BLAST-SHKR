@@ -45,13 +45,26 @@ export function App() {
   const [flashLabel, setFlashLabel] = useState("");
   const [flashColor, setFlashColor] = useState("");
   const [flashWinner, setFlashWinner] = useState("");
-  const [flashClass, setFlashClass] = useState("");
+  // null = no flash; 0 = show on P1 (left) block; 1 = show on P2 (right) block.
+  // Replaces the old flashClass approach so flash is contained inside the
+  // player column instead of overlaying the entire card. Matches the standalone
+  // overlay.html per-player flash container model.
+  const [flashSide, setFlashSide] = useState<0 | 1 | null>(null);
   const [p1Pop, setP1Pop] = useState(false);
   const [p2Pop, setP2Pop] = useState(false);
   const [pos, setPos] = useState(() => parsePos());
   const [sizeTick, setSizeTick] = useState(0); // trigger re-render when scale/w/h changes
 
-  const scaleRef = useRef<number>(parseFloat(localStorage.getItem(STORAGE_KEYS.overlayScale) || "1"));
+  // Initial scale: if user has a saved scale, restore it; otherwise auto-fit
+  // to 75% of the current window width (matches the standalone overlay's first-
+  // load behavior so a fresh OBS browser source renders at a sensible default
+  // size instead of pixel-tiny).
+  const scaleRef = useRef<number>((() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.overlayScale);
+    if (saved !== null) return parseFloat(saved);
+    const auto = (window.innerWidth * 0.75) / BASE_W;
+    return Math.max(0.3, Math.min(3.0, auto));
+  })());
   const wRef = useRef<number>(parseFloat(localStorage.getItem(STORAGE_KEYS.overlayW) || String(BASE_W * scaleRef.current)));
   const hRef = useRef<number>(parseFloat(localStorage.getItem(STORAGE_KEYS.overlayH) || "0")); // 0 = auto
 
@@ -134,6 +147,12 @@ export function App() {
   }, [state, prevState]);
 
   // ── FINISH FLASH — trigger only when lastFinish changes ───────────
+  // Mirrors the standalone overlay's showFlash() type-aware copy:
+  //   Normal (XTR/OVR/BST/SPF): scorerIdx = scorer; flash on scorer side; "<NAME> SCORES"
+  //   OF2/OF3: scorerIdx = opponent gaining N points; flash on gainer side; "OPPONENT +N PTS"
+  //   LER:     scorerIdx = opponent gaining the point; flash on gainer side; "OPPONENT PENALTY"
+  //   LER-STRIKE: scorerIdx = the committer themselves (judge sets this on
+  //               purpose); flash on committer side; "<NAME> LAUNCH ERROR"
   useEffect(() => {
     if (!state || !state.lastFinish || !prevState) return;
     const same =
@@ -141,18 +160,35 @@ export function App() {
       prevState.lastFinish.type === state.lastFinish.type &&
       JSON.stringify(prevState.pts) === JSON.stringify(state.pts);
     if (same) return;
+
     const p1Color = getComputedStyle(document.documentElement)
       .getPropertyValue("--p1-color").trim() || "#60A5FA";
     const p2Color = getComputedStyle(document.documentElement)
       .getPropertyValue("--p2-color").trim() || "#FB923C";
+
     const { type, scorerIdx } = state.lastFinish;
+    const idx: 0 | 1 = scorerIdx === 1 ? 1 : 0;
+    const playerName = idx === 0 ? state.p1 : state.p2;
+    const sideColor = idx === 0 ? p1Color : p2Color;
     const label = FINISH_LABELS[type] || type;
-    const winner = scorerIdx === 0 ? state.p1 : state.p2;
-    const color = scorerIdx === 0 ? p1Color : p2Color;
+
+    let bottomLine: string;
+    if (type === "LER-STRIKE") {
+      bottomLine = `${playerName || "Player"} LAUNCH ERROR`;
+    } else if (type === "LER") {
+      bottomLine = "OPPONENT PENALTY";
+    } else if (type === "OF2") {
+      bottomLine = "OPPONENT +2 PTS";
+    } else if (type === "OF3") {
+      bottomLine = "OPPONENT +3 PTS";
+    } else {
+      bottomLine = `${playerName || "Player"} SCORES`;
+    }
+
     setFlashLabel(label);
-    setFlashColor(color);
-    setFlashWinner((winner || "Player") + " SCORES");
-    setFlashClass(scorerIdx === 0 ? "p1-win" : "p2-win");
+    setFlashColor(sideColor);
+    setFlashWinner(bottomLine);
+    setFlashSide(idx);
     setFlashVisible(true);
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
     flashTimerRef.current = setTimeout(() => setFlashVisible(false), 2200);
@@ -176,9 +212,19 @@ export function App() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "r" || e.key === "R") {
+        // Reset BOTH position and scale to defaults (75% window-width auto-fit
+        // and bottom-left). Matches standalone overlay.html R-key behavior so
+        // streamers can reset to a known-good size from a single keystroke.
         const np = { x: 30, y: 880 };
-        setPos(np);
+        const autoScale = Math.max(0.3, Math.min(3.0, (window.innerWidth * 0.75) / BASE_W));
+        scaleRef.current = autoScale;
+        wRef.current = 0;
+        hRef.current = 0;
         localStorage.setItem(STORAGE_KEYS.overlayPos, JSON.stringify(np));
+        localStorage.setItem(STORAGE_KEYS.overlayScale, String(autoScale));
+        localStorage.setItem(STORAGE_KEYS.overlayW, "0");
+        localStorage.setItem(STORAGE_KEYS.overlayH, "0");
+        setPos(np);
         setSizeTick((t) => t + 1);
       }
       if (e.key === "=" || e.key === "+") {
@@ -200,6 +246,56 @@ export function App() {
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ── PINCH-TO-ZOOM (two-finger gesture on the widget) ──────────────
+  // Mirrors standalone overlay.html — spread two fingers to grow, pinch to
+  // shrink. Saves the new scale to localStorage on touchend so it persists
+  // across reloads. Single-finger touches are not affected (they continue to
+  // route to the resize handles via useResizable).
+  useEffect(() => {
+    const widget = widgetRef.current;
+    if (!widget) return;
+    let pinchStartDist: number | null = null;
+    let pinchStartScale: number | null = null;
+
+    function onTouchStart(e: TouchEvent) {
+      if (e.touches.length !== 2) return;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      pinchStartDist = Math.hypot(dx, dy);
+      pinchStartScale = scaleRef.current;
+      e.preventDefault();
+    }
+    function onTouchMove(e: TouchEvent) {
+      if (e.touches.length !== 2 || pinchStartDist === null || pinchStartScale === null) return;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      const newScale = Math.max(0.3, Math.min(3.0, pinchStartScale * (dist / pinchStartDist)));
+      scaleRef.current = newScale;
+      wRef.current = 0;
+      hRef.current = 0;
+      setSizeTick(t => t + 1);
+      e.preventDefault();
+    }
+    function onTouchEnd(e: TouchEvent) {
+      if (pinchStartDist !== null && e.touches.length < 2) {
+        pinchStartDist = null;
+        pinchStartScale = null;
+        localStorage.setItem(STORAGE_KEYS.overlayScale, String(scaleRef.current));
+        localStorage.setItem(STORAGE_KEYS.overlayW, "0");
+        localStorage.setItem(STORAGE_KEYS.overlayH, "0");
+      }
+    }
+    widget.addEventListener("touchstart", onTouchStart, { passive: false });
+    widget.addEventListener("touchmove", onTouchMove, { passive: false });
+    widget.addEventListener("touchend", onTouchEnd);
+    return () => {
+      widget.removeEventListener("touchstart", onTouchStart);
+      widget.removeEventListener("touchmove", onTouchMove);
+      widget.removeEventListener("touchend", onTouchEnd);
+    };
   }, []);
 
   // ── DERIVED RENDER DATA ────────────────────────────────────────────
@@ -263,12 +359,6 @@ export function App() {
               </div>
             )}
 
-            {/* Finish flash overlay (sits on top of card content) */}
-            <div id="finish-flash" className={flashVisible ? `visible ${flashClass}` : ""}>
-              <div className="flash-type" id="flash-type-text" style={{ color: flashColor, textShadow: `0 0 30px ${flashColor}` }}>{flashLabel}</div>
-              <div className="flash-winner" id="flash-winner-text">{flashWinner}</div>
-            </div>
-
             {/* Tournament bar */}
             <div className="tourney-bar">
               <span className="brand" id="brand-text">{brandText}</span>
@@ -289,6 +379,12 @@ export function App() {
                 <div className="player-name" id="p1-name">{state?.p1 || "—"}</div>
                 <div className="player-side" id="p1-side">{state?.p1Side || ""}</div>
                 {renderCombo(state?.p1ActiveCombo || null, "p1")}
+                {/* Per-player finish flash — overlays this column only.
+                    Positioned absolute against the .player container. */}
+                <div id="p1-flash" className={`player-flash${flashVisible && flashSide === 0 ? " visible" : ""}`}>
+                  <div className="flash-type" style={{ color: flashColor, textShadow: `0 0 24px ${flashColor}` }}>{flashLabel}</div>
+                  <div className="flash-winner">{flashWinner}</div>
+                </div>
               </div>
 
               {/* Center */}
@@ -311,6 +407,11 @@ export function App() {
                 <div className="player-name" id="p2-name">{state?.p2 || "—"}</div>
                 <div className="player-side" id="p2-side">{state?.p2Side || ""}</div>
                 {renderCombo(state?.p2ActiveCombo || null, "p2")}
+                {/* Per-player finish flash — overlays this column only. */}
+                <div id="p2-flash" className={`player-flash${flashVisible && flashSide === 1 ? " visible" : ""}`}>
+                  <div className="flash-type" style={{ color: flashColor, textShadow: `0 0 24px ${flashColor}` }}>{flashLabel}</div>
+                  <div className="flash-winner">{flashWinner}</div>
+                </div>
               </div>
 
             </div>

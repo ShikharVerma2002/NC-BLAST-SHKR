@@ -316,8 +316,15 @@ html, body {
   text-transform: uppercase;
 }
 
-/* ── FINISH FLASH BANNER ───────────────────── */
-#finish-flash {
+/* ── FINISH FLASH BANNER (per-player) ──────── */
+/* Each player block has position:relative so its flash container sits
+   exactly inside that column rather than overlaying the whole card.
+   Matches the standalone overlay's per-player flash placement so the
+   flash always reads as "this side committed/scored". */
+.player {
+  position: relative;
+}
+.player-flash {
   position: absolute;
   inset: 0;
   display: none;
@@ -326,28 +333,39 @@ html, body {
   justify-content: center;
   pointer-events: none;
   z-index: 50;
-  border-radius: 6px;
+  border-radius: 4px;
   overflow: hidden;
+  padding: 0 8px;
 }
-#finish-flash.visible { display: flex; }
-#finish-flash.p1-win { background: rgba(59,130,246,0.25); }
-#finish-flash.p2-win { background: rgba(249,115,22,0.25); }
+.player-flash.visible { display: flex; }
+#p1-flash { background: rgba(59,130,246,0.22); }
+#p2-flash { background: rgba(249,115,22,0.22); }
 
 .flash-type {
   font-family: 'Barlow Condensed', sans-serif;
-  font-size: 52px;
+  font-size: 32px;
   font-weight: 900;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
 }
 .flash-winner {
   font-family: 'Barlow Condensed', sans-serif;
-  font-size: 22px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.10em;
   text-transform: uppercase;
-  color: rgba(255,255,255,0.7);
-  margin-top: 4px;
+  color: rgba(255,255,255,0.75);
+  margin-top: 3px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
 }
 
 

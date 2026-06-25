@@ -41,6 +41,7 @@ import { S } from "../styles";
 import { IC } from "../components/Icons";
 import { JudgeInput } from "../components/JudgeInput";
 import { PartLabel } from "../components/PartLabel";
+import { ShuffleTimer } from "../components/ShuffleTimer";
 import {
   CROSSOVER_BLADES, CX_CHIPS, CX_BLADES, CXE_BLADES, CXE_OVER_BLADES,
   CX_ASSISTS, CX_ASSIST_TOP5, TOP10, BLADE_COLORS, QUICK_COMBOS,
@@ -51,6 +52,8 @@ import { enqueue, remove as removeFromQueue } from "../submitQueue";
 import { useRefreshGuard } from "../hooks/useRefreshGuard";
 import { getSessionToken } from "../pin";
 import { getPreregCombos } from "../orgClient";
+import { pushScoreLogEntry } from "../orgClient";
+import { sendPing } from "../orgClient";
 
 type Phase = "pick" | "deck" | "battle" | "over";
 
@@ -250,6 +253,15 @@ export function MatchScreen(props: MatchScreenProps) {
   const [sets,setSets] = useState<[number, number]>([0,0]);
   const [curSet,setCurSet] = useState(1);
   const [shuf,setShuf] = useState(0);
+  // Shuffle timer (tournament mode only): null when not active. Two modes:
+  //   "active" — mid-set shuffle, both decks exhausted; on dismiss increment shuf
+  //   "newset" — start of a new set after side-pick; on dismiss don't bump shuf
+  // Matches the standalone NC BLAST behavior. The "expired" sub-state lives
+  // inside the ShuffleTimer component itself.
+  const [shuffleTimer, setShuffleTimer] = useState<null | "active" | "newset">(null);
+  // Ping-to-TO button state. "sent" auto-resets after 3s so the judge can
+  // ping again if the organizer doesn't respond. Errors surface via alert.
+  const [pingStatus, setPingStatus] = useState<null | "sending" | "sent">(null);
   const [log,setLog] = useState<LogEntry[]>(()=>sGet(KEYS.matchLog,[] as LogEntry[]));
   const [future,setFuture] = useState<LogEntry[]>([]);
   const [matchStartIdx, setMatchStartIdx] = useState<number>(() => sGet(KEYS.matchStartIdx, 0));
@@ -417,6 +429,27 @@ export function MatchScreen(props: MatchScreenProps) {
   const need = Math.ceil(config.bo/2);
   const cReady = d1.every(comboReady)&&d2.every(comboReady);
 
+  // Ping the TO. Sends current judge name + matchup so the org dashboard
+  // shows context. State resets to null after 3s so the button can be reused.
+  const handleSendPing = async (): Promise<void> => {
+    if (!challongeSlug || pingStatus === "sending") return;
+    setPingStatus("sending");
+    const result = await sendPing({
+      slug: challongeSlug,
+      judge: judge || "",
+      p1: p1 || "",
+      p2: p2 || "",
+      comment: "Judge needs assistance",
+    });
+    if (!result.ok) {
+      setPingStatus(null);
+      alert(`Ping failed: ${result.message}`);
+      return;
+    }
+    setPingStatus("sent");
+    setTimeout(() => setPingStatus(null), 3000);
+  };
+
   const pushOverlay = (extraState: Record<string, unknown> = {}): void => {
     if(!overlaySlot) return; // streaming disabled
     const activeComboOf = (deck: Combo[], idx: number | null): { blade: string; ratchet: string | null; bit: string | null } | null => {
@@ -515,7 +548,8 @@ export function MatchScreen(props: MatchScreenProps) {
         if(ns[scoringPi]>=need){ saveCombosToStorage(); setPhase("over"); }
         else {
           if(config.tm){const loserPi: 0 | 1=(1-scoringPi) as 0 | 1;setSideAssign({pickPriority:loserPi});setSidePicker({priority:loserPi});}
-          setCurSet(c=>c+1); setPts([0,0]); setUsed1([]); setUsed2([]); setShuf(s=>s+1);
+          // New set begins — shuffle counter resets to 1, used arrays cleared.
+          setCurSet(c=>c+1); setPts([0,0]); setUsed1([]); setUsed2([]); setShuf(1);
           setLerStrikes([0,0]);
         }
       }
@@ -534,10 +568,22 @@ export function MatchScreen(props: MatchScreenProps) {
       if(ns[scoringPi]>=need){ saveCombosToStorage(); setPhase("over"); }
       else {
         if(config.tm){ const loserPi: 0 | 1=(1-scoringPi) as 0 | 1; setSideAssign({pickPriority:loserPi}); setSidePicker({priority:loserPi}); }
-        setCurSet(c=>c+1); setPts([0,0]); setUsed1([]); setUsed2([]); setShuf(s=>s+1);
+        // New set begins — shuffle counter resets to 1, used arrays cleared.
+        setCurSet(c=>c+1); setPts([0,0]); setUsed1([]); setUsed2([]); setShuf(1);
       }
     } else {
-      if(nu1.length>=3&&nu2.length>=3){ setUsed1([]); setUsed2([]); setShuf(s=>s+1); }
+      // Mid-set shuffle: both decks exhausted, increment counter (not a new set).
+      // In tournament mode, show the 60s ShuffleTimer overlay and defer the
+      // shuf/used reset until the judge dismisses it (so the dismiss handler
+      // is the source of truth for the shuf bump).
+      if(nu1.length>=3&&nu2.length>=3){
+        if(config.tm){
+          setShuffleTimer("active");
+          pushOverlay({shuffling:true});
+        } else {
+          setUsed1([]); setUsed2([]); setShuf(s=>s+1);
+        }
+      }
       // stay on battle screen — combos reset via setR1/setR2 null above
     }
   };
@@ -627,6 +673,21 @@ export function MatchScreen(props: MatchScreenProps) {
       removeFromQueue(queueId);
       setChallongeSubmitStatus("ok");
       fetchActiveMatches();
+      // Push to judge accountability score log (fire-and-forget, never blocks).
+      // Mirrors standalone NC BLAST behavior at index.html:13345-13363. The
+      // org dashboard reads this via /scorelog/list to audit who scored what.
+      const winnerIsP1 = winnerChallongeId !== null && String(winnerChallongeId) === String(challongeP1ParticipantId);
+      pushScoreLogEntry({
+        slug: challongeSlug,
+        judge: judge || "",
+        p1: p1 || "",
+        p2: p2 || "",
+        p1Sets: p1Score,
+        p2Sets: p2Score,
+        winner: winnerIsP1 ? (p1 || "") : (p2 || ""),
+        challongeMatchId: matchId,
+        scoredAt: Date.now(),
+      }).catch(() => { /* best-effort — never surfaces an error */ });
     } catch(err) {
       // Leave queued — retry loop will pick it up.
       setChallongeSubmitStatus(`Saved — will retry when back online (${(err as Error).message || "error"})`);
@@ -648,6 +709,7 @@ export function MatchScreen(props: MatchScreenProps) {
     sSave(KEYS.matchStartIdx, sGet(KEYS.matchLog,[] as LogEntry[]).length);
     setOverlaySlot(0);try{localStorage.setItem(KEYS.overlaySlot,"0");}catch{/* ignore */}
     setP1Color("#2563EB"); setP2Color("#DC2626");
+    setShuffleTimer(null);
   };
 
   // Navigation helpers — Unified back navigation — context-aware, no stale closure issues
@@ -696,6 +758,34 @@ export function MatchScreen(props: MatchScreenProps) {
 
 
   // ── Abandon confirm overlay — rendered first so it always shows instantly ──
+  // ═══ SECTION: Shuffle timer (full-screen overlay, takes precedence) ═══
+  // Tournament-mode only. Triggered when both decks hit 3 mid-set OR after
+  // side-pick on a new set. Dismiss handler distinguishes the two cases:
+  //   "active" → mid-set shuffle: bump shuf, clear used arrays.
+  //   "newset" → new-set start: don't bump shuf (already reset to 1).
+  if (shuffleTimer) {
+    const dismissTimer = (): void => {
+      pushOverlay({ shuffling: false });
+      setUsed1([]);
+      setUsed2([]);
+      if (shuffleTimer === "active") setShuf((s) => s + 1);
+      setShuffleTimer(null);
+    };
+    return (
+      <ShuffleTimer
+        onDismiss={dismissTimer}
+        p1={p1}
+        p2={p2}
+        sets={sets}
+        pts={pts}
+        need={need}
+        curSet={curSet}
+        config={config}
+        swapped={false}
+      />
+    );
+  }
+
   // ═══ SECTION: Abandon confirm modal (early return, always takes precedence) ═══
   if(abandonConfirm){
     return (
@@ -2139,6 +2229,19 @@ export function MatchScreen(props: MatchScreenProps) {
           {overlaySlot>0&&(
             <button type="button" onClick={()=>{ pushOverlay(); }} style={{background:overlayStatus==="ok"?"#15803D":"#EA580C",border:"none",color:"#fff",borderRadius:bp(6),padding:`${bp(2)}px ${bp(6)}px`,fontSize:bf(9),fontWeight:800,fontFamily:"'Outfit',sans-serif",cursor:"pointer",flexShrink:0}} title="Connect overlay / push live state">
               {overlayStatus==="ok"?"🟢 LIVE":"▶ Connect"}
+            </button>
+          )}
+          {/* Send a ping to the TO. Visible only when we know the slug
+              (org dashboard listens per-slug). Disabled while in flight. */}
+          {challongeSlug && (
+            <button
+              type="button"
+              onClick={() => void handleSendPing()}
+              disabled={pingStatus === "sending"}
+              style={{ background: pingStatus === "sent" ? "#15803D" : "#DC2626", border: "none", color: "#fff", borderRadius: bp(6), padding: `${bp(2)}px ${bp(6)}px`, fontSize: bf(9), fontWeight: 800, fontFamily: "'Outfit',sans-serif", cursor: pingStatus === "sending" ? "wait" : "pointer", flexShrink: 0 }}
+              title="Send a ping to the tournament organizer"
+            >
+              {pingStatus === "sending" ? "…" : pingStatus === "sent" ? "✓ TO" : "🚨 TO"}
             </button>
           )}
           <button onClick={()=>setHistoryOpen(true)} style={{background:"none",border:"none",color:"var(--text-muted)",cursor:"pointer",padding:`${bp(3)}px ${bp(5)}px`,display:"flex",alignItems:"center"}}>{IC.history}</button>

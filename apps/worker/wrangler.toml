@@ -4,6 +4,7 @@
 # Dev:        npx wrangler dev
 # Secrets:    npx wrangler secret put CHALLONGE_API_KEY
 #             npx wrangler secret put ORGANIZER_MASTER_KEY
+#             npx wrangler secret put CHALLONGE_OAUTH_CLIENT_SECRET
 # KV:         npx wrangler kv namespace create TOURNEY_KV
 #             (then paste the id below)
 
@@ -11,6 +12,12 @@ name = "ncblast-worker"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Public OAuth client_id — safe to commit since it's already visible to
+# browsers via the /auth/authorize-url response. The matching client_secret
+# is set as a Worker secret via `wrangler secret put CHALLONGE_OAUTH_CLIENT_SECRET`.
+[vars]
+CHALLONGE_OAUTH_CLIENT_ID = "0eefcaa06778c23a5849ca66061fadae9529eb2cb120ff94a783190ab85bd1b8"
 
 # Paste your KV namespace id here after running `wrangler kv namespace create TOURNEY_KV`.
 # Example:
@@ -23,5 +30,6 @@ id = "bcd1be40ad094ce5a0b86d7bebc2df7f"
 
 # Secrets are set via `wrangler secret put <NAME>` — they do NOT go in this file.
 # Placeholders for discoverability:
-# - CHALLONGE_API_KEY
-# - ORGANIZER_MASTER_KEY
+# - CHALLONGE_API_KEY                  (Challonge v1 API key for legacy endpoints)
+# - ORGANIZER_MASTER_KEY               (emergency master key for organizer writes)
+# - CHALLONGE_OAUTH_CLIENT_SECRET      (OAuth client_secret for token exchange)
